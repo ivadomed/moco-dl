@@ -33,6 +33,29 @@ You can use `requirement.txt` to install dependencies inside your conda environm
 pip install -r requirement.txt
 ```
 
+## Dataset for training
+This project used publicly available healthy-participant datasets: 
+*   [Spine Generic Public Database (multi-subject)](https://github.com/spine-generic/data-multi-subject) for dMRI (n = 267)
+*   OpenNeuro Database ([ds004386](https://openneuro.org/datasets/ds004386/versions/1.1.2), [ds004616](https://openneuro.org/datasets/ds004616/versions/1.1.1), [ds005075](https://openneuro.org/datasets/ds005075/versions/1.0.1), [ds006729](https://openneuro.org/datasets/ds006729/versions/1.0.0)) for fMRI (n = 232).
+
+The dataset follows the BIDS convention. For example:
+
+```
+sub-01/
+├── ses-01/
+│   ├── anat/
+│   │   ├── sub-01_ses-01_T2w.json
+│   │   ├── sub-01_ses-01_T2w.nii.gz
+│   ├── func/
+│   │   ├── sub-01_ses-01_task-rest_bold.json
+│   │   ├── sub-01_ses-01_task-rest_bold.nii.gz
+│   ├── dwi/
+│   │   ├── sub-01_dwi.bval
+│   │   ├── sub-01_dwi.bvec
+│   │   ├── sub-01_dwi.json
+│   │   ├── sub-01_dwi.nii.gz
+```
+
 ## Model Architecture and Training
 This project used the `DenseNet` model implemented in PyTorch Lightning (`moco_main.py`).
 
