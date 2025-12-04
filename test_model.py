@@ -150,22 +150,22 @@ def main(data_dir, ckpt_path):
                         continue
 
                     # Extract high-frequency texture
-                    raw_smooth = cv2.GaussianBlur(img_raw, (0, 0), 0.6)
+                    raw_smooth = cv2.GaussianBlur(img_raw, (0, 0), 0.5)
                     texture = img_raw - raw_smooth
 
                     # Re-inject texture to restore sharpness
-                    out = img_warped + 1.3 * texture
+                    out = img_warped + 1.2 * texture
                     lo, hi = np.percentile(img_raw[mask_slice > 0], [0.5, 99.5])
                     out = np.clip(out, lo, hi)
                     sharpened[..., d, t] = out
 
             # Histogram matching
-            matched = np.zeros_like(warped)
+            matched = np.zeros_like(sharpened)
             for t in range(warped.shape[-1]):
                 if ref_data.ndim == 4:
-                    matched[..., t] = match_histograms(warped[..., t], ref_data[..., t])
+                    matched[..., t] = match_histograms(sharpened[..., t], ref_data[..., t])
                 else:
-                    matched[..., t] = match_histograms(warped[..., t], ref_data)
+                    matched[..., t] = match_histograms(sharpened[..., t], ref_data)
 
             # Build 5D displacement field (H, W, D, T, 3)
             disp = np.moveaxis(flow, 0, -1).astype(np.float32)  # (H,W,D,T,3), voxel units
