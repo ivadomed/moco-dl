@@ -1,0 +1,28 @@
+# Configuration file defining filename patterns for dMRI and fMRI datasets.
+# This allows all scripts to automatically locate moving, fixed, mask, and raw NIfTI files in a BIDS-like structure.
+#
+# Keys:
+#   raw    : pattern for original input file
+#   moving : pattern for augmented moving image
+#   fixed  : pattern for fixed reference
+#   mask   : pattern for spinal cord mask
+#   subdir : subfolder containing the files (e.g., dwi/ or func/)
+#   suffix : suffix used in output filenames
+
+dmri:
+  raw: "sub-*_dwi.nii.gz"
+  moving: "aug_*_dwi.nii.gz"
+  fixed: "dup_*_fixed.nii.gz"
+  mask: "mask_*.nii.gz"
+  moco: "moco_*_dwi.nii.gz"
+  subdir: "dwi"
+  suffix: "dwi"
+
+fmri:
+  raw: "sub-*_bold.nii.gz"
+  moving: "aug_*_bold.nii.gz"
+  fixed: "*_mean.nii.gz"
+  mask: "mask_*.nii.gz"
+  moco: "moco_*_bold.nii.gz"
+  subdir: "func"
+  suffix: "bold"
