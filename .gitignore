@@ -4,3 +4,6 @@ raw_data*
 __pycache__*
 *ckpt
 wandb*
+*png
+*npz
+moco_project*
