@@ -1,0 +1,22 @@
+{
+  "subject": "sub-ZS041_task-rest_acq-autozshim_bold",
+  "shape": [
+    128,
+    128,
+    24,
+    250
+  ],
+  "n_iterations": 1,
+  "tsnr_before": 7.779192924499512,
+  "tsnr_after": 8.672127723693848,
+  "tsnr_delta": 0.8929347991943359,
+  "dvars_before": 18.337400436401367,
+  "dvars_after": 17.394804000854492,
+  "dvars_delta": -0.942596435546875,
+  "rmse_to_mean_before": 14.064325332641602,
+  "rmse_to_mean_after": 13.751401901245117,
+  "rmse_to_mean_delta": -0.3129234313964844,
+  "rmse_to_mean_relative": -0.02224944531917572,
+  "mean_displacement_vox": 0.12600581347942352,
+  "max_displacement_vox": 0.39830878376960754
+}

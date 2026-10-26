@@ -1,0 +1,22 @@
+{
+  "subject": "sub-09_ses-02_task-handgrasp_bold",
+  "shape": [
+    128,
+    44,
+    25,
+    300
+  ],
+  "n_iterations": 1,
+  "tsnr_before": 11.534778594970703,
+  "tsnr_after": 13.209129333496094,
+  "tsnr_delta": 1.6743507385253906,
+  "dvars_before": 71.1146469116211,
+  "dvars_after": 60.96870803833008,
+  "dvars_delta": -10.145938873291016,
+  "rmse_to_mean_before": 70.49095153808594,
+  "rmse_to_mean_after": 69.35651397705078,
+  "rmse_to_mean_delta": -1.1344375610351562,
+  "rmse_to_mean_relative": -0.016093378886580467,
+  "mean_displacement_vox": 0.34664011001586914,
+  "max_displacement_vox": 1.8250538110733032
+}

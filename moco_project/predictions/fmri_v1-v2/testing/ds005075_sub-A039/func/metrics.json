@@ -1,0 +1,22 @@
+{
+  "subject": "sub-A039_task-rest_bold",
+  "shape": [
+    120,
+    120,
+    69,
+    265
+  ],
+  "n_iterations": 1,
+  "tsnr_before": 22.58732032775879,
+  "tsnr_after": 25.13765525817871,
+  "tsnr_delta": 2.550334930419922,
+  "dvars_before": 46.93716049194336,
+  "dvars_after": 43.60197448730469,
+  "dvars_delta": -3.335186004638672,
+  "rmse_to_mean_before": 35.1735954284668,
+  "rmse_to_mean_after": 33.57989501953125,
+  "rmse_to_mean_delta": -1.5937004089355469,
+  "rmse_to_mean_relative": -0.04530956968665123,
+  "mean_displacement_vox": 0.09666172415018082,
+  "max_displacement_vox": 0.3115752041339874
+}

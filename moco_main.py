@@ -36,7 +36,6 @@ Arguments:
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import gc
@@ -51,7 +50,6 @@ import json
 import torch.nn as nn
 import pytorch_lightning as pl
 import torch.nn.functional as F
-
 from torch import optim
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 from monai.networks.blocks import Warp
@@ -82,10 +80,11 @@ class DataGenerator(Dataset):
         final_path = pt_path if os.path.isabs(pt_path) else os.path.join(self.data_dir, pt_path)
         data = torch.load(final_path, weights_only=False)
 
-        moving = data["moving"]  # (B,1,H,W,D,T)
-        fixed = data["fixed"]  # (B,1,H,W,D) [fMRI] or (B,1,H,W,D,T) [dMRI]
+        moving = data["moving"] if "moving" in data else data["clean"]
+        fixed = data["fixed"]
         mask = data["mask"]
         affine = data["affine"]
+
 
         return {"moving": moving, "fixed": fixed, "mask": mask,
                 "affine": affine, "data_path": pt_path}
@@ -368,8 +367,7 @@ class DenseRigidReg(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         moving, fixed, mask = batch["moving"], batch["fixed"], batch["mask"]
-        warped_all, Tx, Ty = self(moving, fixed, mask)
-
+        warped_all, flow_all, Tx, Ty = self(moving, fixed, mask)
         # Similarity (GNCC + masked L2 + masked L1)
         loss_lncc = global_ncc_loss(warped_all, fixed, mask)  # negative → lower is better
         loss_l2 = l2_loss(warped_all, fixed, mask)
@@ -395,8 +393,7 @@ class DenseRigidReg(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         with torch.no_grad():
             moving, fixed, mask = batch["moving"], batch["fixed"], batch["mask"]
-            warped_all, Tx, Ty = self(moving, fixed, mask)
-
+            warped_all, flow_all, Tx, Ty = self(moving, fixed, mask)
             loss_lncc = global_ncc_loss(warped_all, fixed, mask)  # negative → lower is better
             loss_l2 = l2_loss(warped_all, fixed, mask)
             loss_sim = 0.2 * loss_l2 + 1.0 * loss_lncc
@@ -415,7 +412,7 @@ class DenseRigidReg(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-4)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=15, verbose=True
+            optimizer, mode="min", factor=0.5, patience=15
         )
         return {
             "optimizer": optimizer,

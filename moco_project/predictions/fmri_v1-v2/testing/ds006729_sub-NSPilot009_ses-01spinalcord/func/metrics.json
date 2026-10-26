@@ -1,0 +1,22 @@
+{
+  "subject": "sub-NSPilot009_ses-01spinalcord_task-FingerTap_bold",
+  "shape": [
+    64,
+    64,
+    15,
+    352
+  ],
+  "n_iterations": 1,
+  "tsnr_before": 5.446175575256348,
+  "tsnr_after": 6.288295745849609,
+  "tsnr_delta": 0.8421201705932617,
+  "dvars_before": 21.14171028137207,
+  "dvars_after": 17.426637649536133,
+  "dvars_delta": -3.7150726318359375,
+  "rmse_to_mean_before": 28.507976531982422,
+  "rmse_to_mean_after": 31.095783233642578,
+  "rmse_to_mean_delta": 2.5878067016601562,
+  "rmse_to_mean_relative": 0.09077482670545578,
+  "mean_displacement_vox": 0.6690672039985657,
+  "max_displacement_vox": 1.652651309967041
+}
