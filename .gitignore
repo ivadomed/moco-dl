@@ -4,3 +4,5 @@ claude*
 .idea*
 wand*
 data*
+test_data*
+cropped_dataset*
