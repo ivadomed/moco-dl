@@ -6,3 +6,4 @@ wand*
 data*
 test_data*
 cropped_dataset*
+__pycache__/
