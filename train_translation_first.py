@@ -58,7 +58,7 @@ NCC_WINDOW = 5                         # LNCC kernel size, scaled down from 9 (a
 REF_T = 9                           # 0-indexed 10th volume as the static reference target
 MAX_SYNTHETIC_SHIFT_PX = 3.0
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-CHECKPOINT_DIR = "claude/fmri_moco/checkpoint_translation_first_20261026"  # where to save best/final model checkpoints
+CHECKPOINT_DIR = "claude/fmri_moco/checkpoint_model1_20261026"  # where to save best/final model checkpoints
 
 WANDB_PROJECT = "spinal-cord-fmri-moco"
 WANDB_RUN_NAME = None                  # None -> wandb auto-generates a name
@@ -167,7 +167,7 @@ def _load_volume(path: str) -> np.ndarray:
 @lru_cache(maxsize=VOLUME_CACHE_SIZE)
 def _load_mean_volume(path: str) -> np.ndarray:
     """Average across the time axis, computed once per volume and cached alongside it."""
-    return _load_volume(path)[:,:,:,10]  # (X, Y, Z)
+    return _load_volume(path).mean(axis=3)  # (X, Y, Z)
 
 
 # --------------------------------------------------------------------------
