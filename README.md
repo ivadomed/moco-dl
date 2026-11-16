@@ -1,155 +1,258 @@
 # Deep Learning Approaches for Motion Correction in Spinal Cord Diffusion MRI and Functional MRI
-This repository introduces a DenseNet-based slice-wise regressor that estimates rigid in-plane translations (Tx, Ty) for motion correction in diffusion MRI (dMRI) and functional MRI (fMRI).
 
-## Overview
-1. **Generate motion-augmented data** using `augmentation.py`  
-   → Simulate slice-wise rigid motion artifacts (only in-plane motion) in dMRI and fMRI data.
+This repository contains a slice-wise deep learning registration pipeline that estimates rigid in-plane translations (Tx, Ty) to motion-correct spinal cord **diffusion MRI (dMRI)** and **functional MRI (fMRI)** data.
 
-2. **Preprocess the dataset** using `preprocessing.py`  
-   → Prepare mean dMRI/fMRI volumes as the taeget volume, perform spinal cord segmentation and create mask along spinal cord via **Spinal Cord Toolbox (SCT)**.
+Each 2D slice of each volume is registered to a reference slice (the temporal mean of the series) by a small convolutional network. Two networks are trained and chained at inference time:
 
-3. **Prepare datasets for training** using `dataset_preparation.py`  
-   → Organize the dataset structure and split into training, validation, (in .pt format) and testing sets.
+- **Model 1 (coarse)**: trained on real data with additional synthetic random shifts (up to ±3 px), using a global + local NCC loss. It learns to recover large displacements.
+- **Model 2 (refinement)**: trained on real data without synthetic shifts, using a local NCC loss only. It is applied iteratively after model 1 to refine the alignment.
 
-4. **Train the DenseNet-based deep learning model** using `moco_main.py`  
-   → Learn rigid slice-wise translations (Tx, Ty) for motion correction across time.
+The transforms are predicted on images cropped around the spinal cord, then transferred back and applied once to the original, uncropped image, so the corrected output keeps the input's grid, affine and header.
 
-5. **Evaluate and test model performance** using `test_model.py`  
-   → Apply the trained model checkpoint to new data, correct motion, and export the 4D motion-corrected volumes as well as Tx and Ty translation parameter.
+The fMRI method is also available in the [Spinal Cord Toolbox](https://spinalcordtoolbox.com/) (SCT v7.4). See [Citation](#citation) for the paper.
+
+## Repository structure
+
+The dMRI and fMRI pipelines live in separate, self-contained folders with the same layout:
+
+```
+moco-dl/
+├── requirement.txt
+├── dmri/
+│   ├── crop_split_dataset.py        # subject-wise train/validation split + crop around the cord
+│   ├── train_translation_first.py   # trains model 1 (coarse)
+│   ├── train_translation_second.py  # trains model 2 (refinement)
+│   ├── infer_adaptive.py            # two-stage motion correction of a 4D DWI series
+│   ├── rigid_model_translation.py   # network (RigidRegistrationNet) + warping
+│   └── coord_transform.py           # transfers a transform from the crop to the raw image
+└── fmri/
+    ├── download_data.sh             # downloads the OpenNeuro fMRI training data
+    ├── files.txt                    # list of BOLD runs used for training
+    ├── crop_split_dataset.py
+    ├── cropped_data/split.csv       # train/validation split used for the published models
+    ├── train_translation_first.py
+    ├── train_translation_second.py
+    ├── infer.py                     # two-stage motion correction of a 4D BOLD series
+    ├── rigid_model_translation.py
+    └── coord_transform.py
+```
+
+The scripts import their neighbours (`rigid_model_translation`, `coord_transform`) and use relative paths, so **run every command from inside `dmri/` or `fmri/`**.
 
 ## Dependencies
-The primary dependencies for this project are:
-*   [Spinal Cord Toolbox (SCT)](https://spinalcordtoolbox.com/): Required for the `preprocessing.py` script.
-*   Python 3.9
-*   PyTorch Lightning
-*   [MONAI](https://github.com/Project-MONAI/MONAI)
-*   NiBabel
-*   scikit-image
-*   PyYAML
-*   Weights&Biases (wandb) — for training visualization and experiment tracking
 
-You can use `requirement.txt` to install dependencies inside your conda environment:
+- Python 3.9+
+- PyTorch, [MONAI](https://github.com/Project-MONAI/MONAI), NiBabel, NumPy, SciPy
+- pandas and scikit-learn (dataset split)
+- matplotlib, tqdm, [Weights & Biases](https://wandb.ai) (training logs and visualizations)
+- `git` and [`git-annex`](https://git-annex.branchable.com/) (data download)
+- `sc_crop`: command-line tool that crops an image around the spinal cord, called as `sc_crop -i INPUT -o OUTPUT`. It must be on your `PATH` for dataset preparation and inference. Another tool with the same interface can be used in dataset preparation via `--crop-cmd`.
+
+Install the Python packages in your environment:
+
 ```bash
 pip install -r requirement.txt
+pip install pandas scikit-learn matplotlib
 ```
 
-## Dataset for training
-This project used publicly available healthy-participant datasets: 
-*   [Spine Generic Public Database (multi-subject)](https://github.com/spine-generic/data-multi-subject) for dMRI (n = 267)
-*   OpenNeuro Database ([ds004386](https://openneuro.org/datasets/ds004386/versions/1.1.2), [ds004616](https://openneuro.org/datasets/ds004616/versions/1.1.1), [ds005075](https://openneuro.org/datasets/ds005075/versions/1.0.1), [ds006729](https://openneuro.org/datasets/ds006729/versions/1.0.0)) for fMRI (n = 232).
+Training logs to Weights & Biases, so run `wandb login` once before training (or set `WANDB_MODE=offline`).
 
-The dataset follows the BIDS convention. For example:
+## Datasets
 
-```
-sub-01/
-├── ses-01/
-│   ├── anat/
-│   │   ├── sub-01_ses-01_T2w.json
-│   │   ├── sub-01_ses-01_T2w.nii.gz
-│   ├── func/
-│   │   ├── sub-01_ses-01_task-rest_bold.json
-│   │   ├── sub-01_ses-01_task-rest_bold.nii.gz
-│   ├── dwi/
-│   │   ├── sub-01_dwi.bval
-│   │   ├── sub-01_dwi.bvec
-│   │   ├── sub-01_dwi.json
-│   │   ├── sub-01_dwi.nii.gz
-```
+The models were trained on publicly available data from healthy participants, in BIDS format.
 
-## Model Architecture and Training
-This project used the `DenseNet` model implemented in PyTorch Lightning (`moco_main.py`).
+**fMRI**: 286 resting-state BOLD runs from 141 subjects across five OpenNeuro datasets: [ds004386](https://openneuro.org/datasets/ds004386/versions/1.1.2) (v1.1.2), [ds004616](https://openneuro.org/datasets/ds004616/versions/1.1.1) (v1.1.1), [ds005075](https://openneuro.org/datasets/ds005075/versions/1.0.1) (v1.0.1), [ds006729](https://openneuro.org/datasets/ds006729/versions/1.0.0) (v1.0.0) and [ds007932](https://openneuro.org/datasets/ds007932) (v1.1.0). The exact runs are listed in `fmri/files.txt`.
 
-*   **Backbone (`DenseNetRegressorSliceWise`)**: A DenseNet-based architecture that takes a pair of slices (motion-augmented and target) and predicts the required translation parameter (Tx, Ty) to align them. It processes the entire volume slice-by-slice.
+**dMRI**: DWI series from the [Spine Generic Public Database (multi-subject)](https://github.com/spine-generic/data-multi-subject).
 
-*   **Warping (`RigidWarp`)**: A module that converted Tx and Ty translation parameters into sampling grids and applied to the motion-augmented volumes using a bilinear interpolation.
+## fMRI workflow
 
-*   **Loss Function**: A composite loss function is used to guide the training:
-    *   **Similarity Loss**: A weighted combination of Global Normalized Cross-Correlation (GNCC) and L2 (MSE) loss to maximize the similarity between the motion-corected and target volumes within the spinal cord region.
-    *   **Smoothness Regularization**: Penalizes large translations and encourages smooth transitions of translation parameters between adjacent slices and time points.
- 
-## End-to-End Workflow
-The following steps guide you through the process, from data preparation to model inference. The scripts are designed to work with a **BIDS**-like directory structure.
+All commands below are run from `fmri/`.
 
-### 1. Data Augmentation
-Simulate slice-wise rigid motion artifacts in your clean dMRI or fMRI data to create the "motion-augmented" volumes for training. The script automatically detects files `*dwi.nii.gz` for dMRI or `*bold.nii.gz` for fMRI.
+### 1. Download the data
 
-**Usage:**
 ```bash
-python augmentation.py /path/to/your_data <dmri|fmri>
+cd fmri
+./download_data.sh /path/to/raw_data
 ```
-*   `/path/to/your_data`: The root directory containing subject folders
-*   `mode`: Specify `dmri` or `fmri`
 
-This generates an `aug_*.nii.gz` file for each subject.
+This clones each OpenNeuro dataset at the version used for training into `/path/to/raw_data/<dataset>/` and downloads only the files listed in `files.txt` with `git annex get`. Files that fail to download are reported as `FAILED: ...` and the script continues. A different list can be passed as a second argument: `./download_data.sh /path/to/raw_data my_files.txt`.
 
-### 2. Preprocessing with SCT
-Prepare the necessary reference (averaged or target) volumes and masks using the Spinal Cord Toolbox (SCT).
+### 2. Split and crop
 
-*   **For dMRI**: Separates b0/dwi volumes, creates a mean dwi/b0 image, segments the cord, creates a mask.
-*   **For fMRI**: Computes a mean volume across time as a target image, segments the cord, and creates a mask.
-
-**Usage:**
 ```bash
-python preprocessing.py /path/to/your_data <dmri|fmri>
+python crop_split_dataset.py --data-root /path/to/raw_data --output cropped_data
 ```
-*   `/path/to/your_data`: The root directory containing subject folders
-*   `mode`: Specify `dmri` or `fmri`
 
-### 3. Dataset Preparation
-Convert the preprocessed NIfTI files into PyTorch tensors (`.pt`), split subjects into training (80%), validation (10%), and testing (10%) sets, and generate a `dataset.json` file to index the dataset. This organizes the data into a `prepared` subfolder.
+- Splits the runs into training and validation **by subject** (all runs of a subject go to the same split), separately within each dataset so every dataset is represented in validation.
+- Crops every run around the spinal cord with `sc_crop`.
+- Writes `cropped_data/train/` and `cropped_data/validation/`, with files named `<dataset>_<original BIDS name>_crop.nii.gz`, and saves the split to `cropped_data/split.csv`.
 
-**Usage:**
+| Option | Default | Description |
+|---|---|---|
+| `--data-root` | (required) | Folder given to `download_data.sh` |
+| `--files` | `files.txt` | List of images, one `<dataset>/<path>` per line |
+| `--output` | `cropped_data` | Where `train/` and `validation/` are written |
+| `--val-size` | `0.2` | Fraction of subjects in validation |
+| `--seed` | `42` | Random seed of the split |
+| `--crop-cmd` | `sc_crop` | Crop command, called as `<cmd> -i INPUT -o OUTPUT` |
+
+Images that already exist in the output folder are skipped, so the script can be re-run after a failure. The `split.csv` used for the published models is included in the repository.
+
+### 3. Train
+
+Training is configured by the constants at the top of each script (no command-line arguments). Before running, set at least:
+
+- `DATA_DIR`: the folder containing `train/` and `validation/` (e.g. `cropped_data`)
+- `CHECKPOINT_DIR`: where checkpoints are written
+
+Other settings include `TARGET_SHAPE` (64×64 in-plane size after padding/cropping), `BATCH_SIZE`, `NUM_EPOCHS`, `LEARNING_RATE`, `NCC_WINDOW` and `WANDB_PROJECT`.
+
 ```bash
-python dataset_preparation.py /path/to/your_data <dmri|fmri>
+python train_translation_first.py    # model 1
+python train_translation_second.py   # model 2
 ```
-*   `/path/to/your_data`: The root directory containing subject folders
-*   `mode`: Specify `dmri` or `fmri`
 
-This creates a `prepared/<mode>_dataset` directory containing the structured dataset and the `dataset.json` index file.
+The two models are trained independently (model 2 does not start from model 1's weights) and can be trained in parallel. Each run saves `best_model.pt` (lowest validation loss) and `final_model.pt` in `CHECKPOINT_DIR`, and logs losses and example registrations (moving / fixed / warped / difference) to Weights & Biases.
 
-### 4. Model Training
-Train the DenseNet-based model using the prepared dataset. The script uses PyTorch Lightning for training and supports logging with Weights & Biases.
+During fMRI training, each slice at time *t* is paired with the same slice of the 10th volume (`REF_T = 9`) as the fixed image.
 
-**Usage:**
+### 4. Inference
+
 ```bash
-python moco_main.py /path/to/project_base /path/to/prepared_dataset <run_name1> <run_name2>(opt)
+python infer.py \
+    --input /path/to/sub-XX_task-rest_bold.nii.gz \
+    --checkpoint1 /path/to/model1/best_model.pt \
+    --checkpoint2 /path/to/model2/best_model.pt \
+    --output /path/to/sub-XX_task-rest_bold_moco.nii.gz
 ```
-*   `/path/to/project_base`: Base directory containing the script (.py) and trained_weights folder
-*   `/path/to/prepared_dataset`: Path to the output directory from Step 3 (e.g., `/path/to/data/prepared/dmri_dataset`)
-*   `<run_name1>`: An identifier for this training run. The best model checkpoint will be saved as `<run_name1>.ckpt`
-*   `<run_name2>`: If provided, in case of fine-tune from `<run_name1>`, it will be save under new model checkpoint `<run_name2>.ckpt`
 
-### 5. Inference
-Apply a trained model checkpoint to a test dataset to perform motion correction. This script loads the test data, runs the model, and saves the 4D motion-corrected volume along with the predicted translation parameters (Tx and Ty).
+The input is a raw (uncropped) 4D BOLD series. The script:
 
-**Usage:**
+1. Crops it around the spinal cord with `sc_crop`.
+2. **Stage 1**: predicts a translation for every (volume, slice) pair with model 1, against the temporal mean of the cropped series. A prediction is rejected (replaced by the identity) if it lowers the NCC between the slice and the reference.
+3. **Stage 2**: applies model 2 iteratively (up to `--n-iter2` times) on the stage-1 result, with the same non-regression check, and stops early when the residual correction falls below `--tol2` or starts increasing.
+4. Composes the stage-1 and stage-2 transforms, transfers them to the raw image coordinates, and warps each raw slice once.
+5. Saves the corrected 4D volume on the raw grid (same affine and header), and prints the time spent in each step.
+
+| Option | Default | Description |
+|---|---|---|
+| `--reference` | `average` | Stage-1 reference: temporal mean (`average`) or first volume (`first`) |
+| `--reference2` | `recompute` | Stage-2 reference: `recompute` (temporal mean of the corrected series, recomputed at each iteration), `same` (stage-1 reference), or `running` (running mean of the previous corrected volumes) |
+| `--n-iter2` | `3` | Maximum number of stage-2 iterations |
+| `--tol2` | `1e-3` | Stage-2 convergence threshold |
+| `--non-reg-tol` | `0.0` | Tolerated NCC decrease before a prediction is rejected |
+| `--interpolation` | `nearest` | Interpolation of the final warp: `nearest`, `bilinear` or `bicubic` |
+| `--cropped-path` | temporary file | Where to write the `sc_crop` output |
+| `--keep-cropped` | off | Keep the cropped image instead of deleting it |
+
+Inference runs on CPU by default (`DEVICE` at the top of the script).
+
+## dMRI workflow
+
+All commands below are run from `dmri/`. The pipeline is the same as for fMRI, with the differences listed in each step.
+
+### 1. Download the data
+
+Clone the Spine Generic dataset into a data folder and download its DWI series with `git-annex`:
+
 ```bash
-python test_model.py /path/to/testing /path/to/trained_weight.ckpt
+mkdir -p /path/to/raw_data && cd /path/to/raw_data
+git clone https://github.com/spine-generic/data-multi-subject.git
+cd data-multi-subject
+git annex get sub-*/dwi/
 ```
-*   `/path/to/testing`: The path to the `testing` folder inside your prepared dataset directory
-*   `/path/to/trained_weight.ckpt`: The full path to the trained model checkpoint file
 
-**Outputs:**
-For each test subject, the following files are saved in their respective `func` or `dwi` subdirectories:
-*   `moco_*.nii.gz`: The 4D motion-corrected NIfTI volume
-*   `*_Tx.nii.gz`: The predicted translation parameters in the x-direction
-*   `*_Ty.nii.gz`: The predicted translation parameters in the y-direction
+### 2. Split and crop
 
-### 6. Quantitative evaluation (optional)
-After motion correction, you can quantitatively evaluate the improvement in image quality using `metrics.py`.  
-This script automatically computes voxel-wise and temporal metrics before and after correction for both **dMRI** and **fMRI** datasets.
-- Computes the following metrics:
-  - **RMSE (Root Mean Squared Error)** — evaluates voxel-wise similarity
-  - **SSIM (Structural Similarity Index)** — measures 3D structural fidelity  
-  - **tSNR (temporal Signal-to-Noise Ratio)** — evaluates signal stability across time *(fMRI only)*  
-  - **DVARS (temporal derivative of RMS variance)** — quantifies temporal signal fluctuation *(fMRI only)*
-
-**Usage:**
 ```bash
-python metrics.py /path/to/testing <dmri|fmri>
+cd dmri
+python crop_split_dataset.py --data-root /path/to/raw_data --output cropped_data_dwi
 ```
-*   `/path/to/testing`: The path to the `testing` folder inside your prepared dataset directory (same as in 5.Inference)
-*   `mode`: Specify `dmri` or `fmri`
 
-**Outputs:**
-A summary CSV file (`dmri_metrics.csv` or `fmri_metrics.csv`): the reported values for each subject are averaged across timepoints.
+Same split and crop as for fMRI, with these differences:
+
+- Without `--files`, every `*dwi.nii.gz` under `/path/to/raw_data/<dataset>/` is used. `sourcedata/` and `prepared/` folders are always skipped, and `derivatives/` folders are skipped unless `--include-derivatives` is given. With `--files`, only the `*dwi.nii.gz` entries of the list are kept.
+- The `.bval`, `.bvec` and `.json` sidecars are copied next to each cropped image with the same name (cropping is spatial only, so the gradient table is unchanged). A warning is printed if a `.bval` or `.bvec` is missing next to the image, since it may be inherited from a higher level in BIDS.
+- The default output folder is `cropped_data_dwi`.
+
+### 3. Train
+
+```bash
+python train_translation_first.py    # model 1
+python train_translation_second.py   # model 2
+```
+
+Configuration works as for fMRI (`DATA_DIR` defaults to `cropped_data_dwi`, `CHECKPOINT_DIR` to `dmri_chkpt/checkpoint_model1` and `dmri_chkpt/checkpoint_model2`). The dMRI training scripts add:
+
+- **Mean reference**: each slice is registered to the mean of that slice across all volumes of the series.
+- **Skipping of images with nothing to correct**: 3D images and series with fewer than `MIN_TIMEPOINTS` (2) volumes, such as a single b0 or reverse phase-encoding scan, are skipped.
+- **Shifted validation set** (`val_shifted`): the validation data with the same kind of synthetic shift as in training, but with a fixed shift per pair so the loss is comparable across epochs. This loss is used for model selection and early stopping. A no-correction baseline is computed once for both validation sets and reported next to the losses.
+- **Early stopping** after `EARLY_STOP_PATIENCE` (10) epochs without an improvement larger than `EARLY_STOP_MIN_DELTA` (1e-3) of the `val_shifted` loss (0 disables it).
+- **Checkpoints**: `best_model.pt` (best `val_shifted` loss), `final_model.pt`, `latest.pt` (weights + optimizer state, overwritten every epoch) and a weights-only snapshot `epoch_XXX.pt` every `SAVE_EVERY` (10) epochs.
+- **Resuming**: set `RESUME_FROM` to a `latest.pt` to continue an interrupted run.
+
+### 4. Inference
+
+```bash
+python infer_adaptive.py \
+    --input /path/to/sub-XX_dwi.nii.gz \
+    --checkpoint1 /path/to/model1/best_model.pt \
+    --checkpoint2 /path/to/model2/best_model.pt \
+    --output /path/to/sub-XX_dwi_moco.nii.gz
+```
+
+Same two-stage procedure and options as the fMRI `infer.py`, with these differences:
+
+- `--checkpoint2` is optional: without it, only stage 1 is applied.
+- `--stage2-reference {average,first}` (default `average`) chooses the reference recomputed at each stage-2 iteration with `--reference2 recompute`: the temporal mean of the corrected series, or its first volume. In dMRI the first volume is usually a b0, whose contrast differs from the diffusion-weighted volumes.
+- `--already-cropped` uses an image that was already cropped by `sc_crop` (e.g. from `cropped_data_dwi/validation/`) as is: the crop step is skipped and the output is on the cropped grid.
+- Checkpoints can be weights-only files (`best_model.pt`, `epoch_XXX.pt`) or a `latest.pt`.
+- 3D inputs and series with fewer than 2 volumes are rejected, since there is nothing to correct.
+- The input's `.bval`, `.bvec` and `.json` are copied next to the output with the same name. The `.bvec` is copied unchanged: the correction is in-plane translation only, so gradient directions do not need to be rotated.
+
+Example on a validation image:
+
+```bash
+python infer_adaptive.py --already-cropped \
+    --input cropped_data_dwi/validation/<dataset>_sub-XX_dwi_crop.nii.gz \
+    --checkpoint1 dmri_chkpt/checkpoint_model1/best_model.pt \
+    --checkpoint2 dmri_chkpt/checkpoint_model2/best_model.pt \
+    --output sub-XX_dwi_moco.nii.gz
+```
+
+## Model
+
+`RigidRegistrationNet` (`rigid_model_translation.py`) takes the moving and fixed slices as a 2-channel 64×64 input and passes them through four strided 3×3 convolutions (16 → 128 channels, LeakyReLU), global average pooling and a linear layer that outputs the two translation parameters (Tx, Ty) in normalized coordinates. The last layer is initialized to zero, so the network starts from the identity. The translation is applied with `affine_grid` / `grid_sample`.
+
+Before entering the network, each slice is clipped to its 1st–99th intensity percentiles, min-max normalized, and center-padded or cropped to 64×64.
+
+The similarity loss combines:
+
+- a **global NCC** computed only over pixels that are non-zero in both images (so zero-padding introduced by large shifts does not bias it), which gives a wide capture range for large displacements;
+- a **local NCC** (MONAI `LocalNormalizedCrossCorrelationLoss`, 5×5 window), which is robust to intensity bias and drives fine sub-pixel alignment.
+
+Model 1 uses both terms with equal weights; model 2 uses the local NCC only.
+
+## Citation
+
+If you use this code or the trained models in your work, please cite:
+
+> Dagonneau T, Bédard S, Tucksinapinunchai N, Yarach U, Le Folgoc L, Gori P, Cohen-Adad J. Fast slice-wise deep learning motion correction for spinal cord functional MRI. arXiv:2611.14677 [cs.CV], 2026. https://arxiv.org/abs/2611.14677
+
+```bibtex
+@ARTICLE{Dagonneau2026-dv,
+  title         = "Fast slice-wise deep learning motion correction for spinal
+                   cord functional {MRI}",
+  author        = "Dagonneau, Thomas and Bédard, Sandrine and Tucksinapinunchai,
+                   Nontharat and Yarach, Uten and Le Folgoc, Loïc and Gori,
+                   Pietro and Cohen-Adad, Julien",
+  journal       = "arXiv [cs.CV]",
+  month         =  nov,
+  year          =  2026,
+  eprint        = "2611.14677",
+  archivePrefix = "arXiv",
+  primaryClass  = "cs.CV",
+  url           = "https://arxiv.org/abs/2611.14677"
+}
+```
