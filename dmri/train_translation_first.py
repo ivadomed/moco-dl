@@ -24,6 +24,7 @@ Requires: pip install monai nibabel torch
 import os
 
 import glob
+import zlib
 from functools import lru_cache
 import random
 import numpy as np
@@ -43,7 +44,7 @@ from rigid_model_translation import RigidRegistrationNet
 # --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
-DATA_DIR = "cropped_dataset"   # common folder containing training/ and validation/ subfolders,
+DATA_DIR = "cropped_data_dwi"   # common folder containing training/ and validation/ subfolders,
                     # each holding one 4D NIfTI per subject directly (non-BIDS)
 TARGET_SHAPE = (64, 64)                # fixed in-plane size after crop/pad -- sized for
                                         # the ~50x50 spinal-cord crop, with margin for
@@ -55,12 +56,17 @@ NUM_EPOCHS = 100
 LEARNING_RATE = 1e-4
 NCC_WINDOW = 5                         # LNCC kernel size, scaled down from 9 (at 128x128)
                                         # proportionally to the new TARGET_SHAPE
-REF_T = 9                           # 0-indexed 10th volume as the static reference target
+MIN_TIMEPOINTS = 2                     # images with fewer volumes (e.g. single b0, 3D) are skipped:
+                                        # nothing to motion-correct
 MAX_SYNTHETIC_SHIFT_PX = 3.0
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-CHECKPOINT_DIR = "claude/fmri_moco/checkpoint_model1_20261026"  # where to save best/final model checkpoints
+CHECKPOINT_DIR = "dmri_chkpt/checkpoint_model1"  # where to save best/final model checkpoints
+SAVE_EVERY = 10                        # also keep a snapshot every N epochs (epoch_010.pt, ...); 0 = off
+RESUME_FROM = None                     # path to a latest.pt to continue training from, or None
+EARLY_STOP_PATIENCE = 10               # stop after this many epochs without improvement; 0 = off
+EARLY_STOP_MIN_DELTA = 1e-3            # smaller decreases of the shifted-val loss don't count
 
-WANDB_PROJECT = "spinal-cord-fmri-moco"
+WANDB_PROJECT = "spinal-cord-dmri-moco"
 WANDB_RUN_NAME = None                  # None -> wandb auto-generates a name
 N_VIZ_SAMPLES = 4                      # number of validation pairs to visualize each epoch
 VOLUME_CACHE_SIZE = 4                  # max number of full 4D volumes kept decompressed in memory per worker
@@ -109,9 +115,15 @@ def build_pairs_for_subject(nifti_path: str, subject_id: str):
     every timepoint (including t=0) is included -- there's no t-1 dependency
     to exclude the first frame for, unlike the previous sequential approach.
     Only reads the NIfTI header (img.shape) -- no pixel data is loaded or stored.
+    Returns [] for 3D images or 4D images with fewer than MIN_TIMEPOINTS volumes.
     """
     img = nib.load(nifti_path)   # header-only, cheap
-    n_slices, n_timepoints = img.shape[2], img.shape[3]
+    shape = img.shape
+    if len(shape) < 4 or shape[3] < MIN_TIMEPOINTS:
+        print(f"  [SKIP] {os.path.basename(nifti_path)}: shape {shape}, "
+              f"need 4D with >= {MIN_TIMEPOINTS} volumes")
+        return []
+    n_slices, n_timepoints = shape[2], shape[3]
 
     pairs = []
     for z in range(n_slices):
@@ -138,16 +150,22 @@ def discover_volumes(folder: str):
 
 def build_pairs_for_split(folder: str):
     """
-    Build the full pair index for one split (training/ or validation/): every
+    Build the full pair index for one split (train/ or validation/): every
     NIfTI file directly under `folder` is treated as one subject.
     """
     paths = discover_volumes(folder)
-    all_pairs, subject_ids = [], []
+    all_pairs, subject_ids, skipped = [], [], []
     for path in paths:
         subject_id = os.path.basename(path).replace(".nii.gz", "").replace(".nii", "")
-        subject_ids.append(subject_id)
         print(f"Building pairs for {subject_id}")
-        all_pairs.extend(build_pairs_for_subject(path, subject_id))
+        pairs = build_pairs_for_subject(path, subject_id)
+        if not pairs:
+            skipped.append(subject_id)
+            continue
+        subject_ids.append(subject_id)
+        all_pairs.extend(pairs)
+    if skipped:
+        print(f"Skipped {len(skipped)} image(s) in {folder} with fewer than {MIN_TIMEPOINTS} volumes")
     return all_pairs, subject_ids
 
 
@@ -175,16 +193,15 @@ def _load_mean_volume(path: str) -> np.ndarray:
 # --------------------------------------------------------------------------
 def load_pair(entry: dict):
     """
-    Validation transform: unaugmented real data registered against the 10th volume (t=9).
+    Validation transform: unaugmented real data registered against the
+    mean volume across all timepoints.
     """
-    volume = _load_volume(entry["path"])  # Cached 4D load: (X, Y, Z, T)
+    volume = _load_volume(entry["path"])        # Cached 4D load: (X, Y, Z, T)
+    mean_volume = _load_mean_volume(entry["path"])  # Cached mean: (X, Y, Z)
     z, t = entry["slice"], entry["t"]
 
-    # Clamp REF_T in case a volume has fewer timepoints than expected
-    ref_t = min(REF_T, volume.shape[3] - 1)
-
     moving_slice = volume[:, :, z, t]
-    fixed_slice = volume[:, :, z, ref_t]
+    fixed_slice = mean_volume[:, :, z]
 
     moving = pad_or_crop(normalize(moving_slice))
     fixed = pad_or_crop(normalize(fixed_slice))
@@ -197,16 +214,15 @@ def load_pair(entry: dict):
 def load_pair_train(entry: dict):
     """
     Training transform:
-    - Fixed target = unshifted slice at frame REF_T (t=9)
+    - Fixed target = mean slice across all timepoints (unshifted)
     - Moving target = slice at timepoint t, randomly translated on-the-fly
     """
     volume = _load_volume(entry["path"])
+    mean_volume = _load_mean_volume(entry["path"])
     z, t = entry["slice"], entry["t"]
 
-    ref_t = min(REF_T, volume.shape[3] - 1)
-
-    # 1. Unshifted reference slice (t=9)
-    fixed_slice = volume[:, :, z, ref_t]
+    # 1. Reference slice: mean across timepoints
+    fixed_slice = mean_volume[:, :, z]
 
     # 2. Moving slice at frame t
     moving_slice = volume[:, :, z, t].copy()
@@ -221,6 +237,35 @@ def load_pair_train(entry: dict):
             mode="constant",
             cval=0.0
         )
+
+    moving = pad_or_crop(normalize(moving_slice))
+    fixed = pad_or_crop(normalize(fixed_slice))
+
+    moving_t = torch.from_numpy(moving.copy()).unsqueeze(0).float()  # (1, H, W)
+    fixed_t = torch.from_numpy(fixed.copy()).unsqueeze(0).float()
+    return moving_t, fixed_t
+
+
+def load_pair_val_shifted(entry: dict):
+    """
+    Validation with synthetic motion: same as the training transform, but every
+    pair always gets the same shift (seeded from its file/slice/timepoint), so the
+    loss is comparable across epochs. This is the held-out version of the training
+    objective, and the metric used for model selection and early stopping.
+    """
+    volume = _load_volume(entry["path"])
+    mean_volume = _load_mean_volume(entry["path"])
+    z, t = entry["slice"], entry["t"]
+
+    fixed_slice = mean_volume[:, :, z]
+    moving_slice = volume[:, :, z, t].copy()
+
+    if MAX_SYNTHETIC_SHIFT_PX > 0.0:
+        seed = zlib.crc32(f"{entry['path']}|{z}|{t}".encode())
+        dy, dx = np.random.default_rng(seed).uniform(
+            -MAX_SYNTHETIC_SHIFT_PX, MAX_SYNTHETIC_SHIFT_PX, size=2)
+        moving_slice = ndi_shift(moving_slice, shift=(dy, dx), order=3,
+                                 mode="constant", cval=0.0)
 
     moving = pad_or_crop(normalize(moving_slice))
     fixed = pad_or_crop(normalize(fixed_slice))
@@ -384,8 +429,8 @@ def make_registration_figure(moving, fixed, warped, n_samples=N_VIZ_SAMPLES):
     return fig
 
 
-def log_validation_images(model, viz_moving, viz_fixed, epoch):
-    """Run the model on a fixed validation batch and log a comparison figure to wandb."""
+def log_validation_images(model, viz_moving, viz_fixed, epoch, key="val/registration_examples"):
+    """Run the model on a fixed batch and log a comparison figure to wandb under `key`."""
     model.eval()
     with torch.no_grad():
         viz_moving_dev = viz_moving.to(DEVICE)
@@ -393,7 +438,7 @@ def log_validation_images(model, viz_moving, viz_fixed, epoch):
         warped, _ = model(viz_moving_dev, viz_fixed_dev)
 
     fig = make_registration_figure(viz_moving.cpu(), viz_fixed.cpu(), warped.cpu())
-    wandb.log({"val/registration_examples": wandb.Image(fig)}, step=epoch)
+    wandb.log({key: wandb.Image(fig)}, step=epoch)
     plt.close(fig)
 
 
@@ -409,7 +454,7 @@ def run_epoch(model, loader, similarity_loss, optimizer=None, epoch=-1, mode_str
     pbar = tqdm(loader, desc=f"Epoch {epoch:03d} [{mode_str}]", leave=False)
 
     with torch.set_grad_enabled(is_train):
-        for moving, fixed in loader:
+        for moving, fixed in pbar:
             moving, fixed = moving.to(DEVICE), fixed.to(DEVICE)
 
             warped, _ = model(moving, fixed)
@@ -422,7 +467,19 @@ def run_epoch(model, loader, similarity_loss, optimizer=None, epoch=-1, mode_str
 
             total_loss += loss.item()
             n_batches += 1
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
 
+    return total_loss / n_batches
+
+
+def identity_loss(loader, similarity_loss, desc):
+    """Loss with no correction (warped = moving): the baseline the model has to beat."""
+    total_loss, n_batches = 0.0, 0
+    with torch.no_grad():
+        for moving, fixed in tqdm(loader, desc=desc, leave=False):
+            moving, fixed = moving.to(DEVICE), fixed.to(DEVICE)
+            total_loss += similarity_loss(moving, fixed).item()
+            n_batches += 1
     return total_loss / n_batches
 
 
@@ -440,6 +497,10 @@ def main():
             "ncc_window": NCC_WINDOW,
             "architecture": "rigid (rotation + translation)",
             "reference": "average across timepoints",
+            "min_timepoints": MIN_TIMEPOINTS,
+            "early_stop_patience": EARLY_STOP_PATIENCE,
+            "early_stop_min_delta": EARLY_STOP_MIN_DELTA,
+            "selection_metric": "val_shifted/loss",
         },
     )
 
@@ -451,44 +512,98 @@ def main():
 
     train_ds = MonaiDataset(data=train_pairs, transform=load_pair_train)
     val_ds = MonaiDataset(data=val_pairs, transform=load_pair)
+    val_shifted_ds = MonaiDataset(data=val_pairs, transform=load_pair_val_shifted)
     train_sampler = GroupedShuffleSampler(train_pairs)
     train_loader = MonaiDataLoader(train_ds, batch_size=BATCH_SIZE, sampler=train_sampler,
                                     num_workers=4, pin_memory=True)
     val_loader = MonaiDataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
                                   num_workers=4, pin_memory=True)
+    val_shifted_loader = MonaiDataLoader(val_shifted_ds, batch_size=BATCH_SIZE, shuffle=False,
+                                          num_workers=4, pin_memory=True)
 
     
     viz_moving_train, viz_fixed_train = next(iter(train_loader))
     # fixed batch used every epoch so visualizations are directly comparable over training
     viz_moving_val, viz_fixed_val = next(iter(val_loader))
+    viz_moving_vs, viz_fixed_vs = next(iter(val_shifted_loader))
 
     model = build_model()
     similarity_loss = build_losses()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    best_val_loss = float("inf")
+    # Baselines with no correction, computed once (the shifts are fixed, so these don't change)
+    base_val = identity_loss(val_loader, similarity_loss, "Baseline [val]")
+    base_val_shifted = identity_loss(val_shifted_loader, similarity_loss, "Baseline [val_shifted]")
+    print(f"No-correction baseline | val loss {base_val:.4f} | val_shifted loss {base_val_shifted:.4f}")
+    wandb.summary["baseline/val_loss"] = base_val
+    wandb.summary["baseline/val_shifted_loss"] = base_val_shifted
 
-    for epoch in range(1, NUM_EPOCHS + 1):
+    best_val_loss = float("inf")       # best val_shifted loss so far (selection metric)
+    epochs_without_improvement = 0
+    start_epoch = 1
+    if RESUME_FROM:
+        ckpt = torch.load(RESUME_FROM, map_location=DEVICE)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        best_val_loss = ckpt["best_val_loss"]
+        epochs_without_improvement = ckpt.get("epochs_without_improvement", 0)
+        start_epoch = ckpt["epoch"] + 1
+        print(f"Resumed from {RESUME_FROM} at epoch {start_epoch}")
+
+    for epoch in range(start_epoch, NUM_EPOCHS + 1):
         train_sampler.set_epoch(epoch)
         train_loss = run_epoch(model, train_loader, similarity_loss, optimizer, epoch, "train")
         val_loss = run_epoch(model, val_loader, similarity_loss, optimizer=None, epoch=epoch, mode_str="val")
+        val_shifted_loss = run_epoch(model, val_shifted_loader, similarity_loss, optimizer=None,
+                                     epoch=epoch, mode_str="val_shifted")
 
-        print(f"Epoch {epoch:03d}/{NUM_EPOCHS} | train loss {train_loss:.4f} | val loss {val_loss:.4f}")
+        print(f"Epoch {epoch:03d}/{NUM_EPOCHS} | train loss {train_loss:.4f} | val loss {val_loss:.4f} "
+              f"(baseline {base_val:.4f}) | val_shifted loss {val_shifted_loss:.4f} "
+              f"(baseline {base_val_shifted:.4f})")
 
         wandb.log({
             "epoch": epoch,
             "train/loss": train_loss,
             "val/loss": val_loss,
+            "val_shifted/loss": val_shifted_loss,
         }, step=epoch)
 
-        log_validation_images(model, viz_moving_train, viz_fixed_train, epoch)
-        log_validation_images(model, viz_moving_val, viz_fixed_val, epoch)
+        log_validation_images(model, viz_moving_train, viz_fixed_train, epoch,
+                              key="train/registration_examples")
+        log_validation_images(model, viz_moving_val, viz_fixed_val, epoch,
+                              key="val/registration_examples")
+        log_validation_images(model, viz_moving_vs, viz_fixed_vs, epoch,
+                              key="val_shifted/registration_examples")
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # Model selection + early stopping on the shifted validation loss
+        if val_shifted_loss < best_val_loss - EARLY_STOP_MIN_DELTA:
+            best_val_loss = val_shifted_loss
+            epochs_without_improvement = 0
             torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, "best_model.pt"))
-            print(f"  -> saved new best model (val loss {val_loss:.4f})")
+            print(f"  -> saved new best model (val_shifted loss {val_shifted_loss:.4f})")
+        else:
+            epochs_without_improvement += 1
+            print(f"  no improvement for {epochs_without_improvement}/{EARLY_STOP_PATIENCE} epochs")
 
+        # Latest weights + optimizer, overwritten every epoch (also used to resume)
+        torch.save({
+            "epoch": epoch,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "best_val_loss": best_val_loss,
+            "epochs_without_improvement": epochs_without_improvement,
+        }, os.path.join(CHECKPOINT_DIR, "latest.pt"))
+        # Weights-only snapshots kept for later comparison with a better metric
+        if SAVE_EVERY and epoch % SAVE_EVERY == 0:
+            torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"))
+
+        if EARLY_STOP_PATIENCE and epochs_without_improvement >= EARLY_STOP_PATIENCE:
+            print(f"Early stopping at epoch {epoch}: no improvement of the val_shifted loss "
+                  f"for {EARLY_STOP_PATIENCE} epochs (best {best_val_loss:.4f})")
+            wandb.summary["stopped_epoch"] = epoch
+            break
+
+    wandb.summary["best_val_shifted_loss"] = best_val_loss
     torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, "final_model.pt"))
     print("Training complete.")
     wandb.finish()
